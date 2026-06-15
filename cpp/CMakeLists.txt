@@ -44,7 +44,7 @@ endif()
 set(BUILD_DISTRIBUTED 0 CACHE BOOL "Build with http support for contributing to distributed training")
 set(USE_BACKEND CACHE STRING "Neural net backend")
 string(TOUPPER "${USE_BACKEND}" USE_BACKEND)
-set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN METAL)
+set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN METAL VULKAN)
 
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
@@ -164,6 +164,420 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
   set(NEURALNET_BACKEND_SOURCES
     neuralnet/eigenbackend.cpp
     )
+elseif(USE_BACKEND STREQUAL "VULKAN")
+  message(STATUS "-DUSE_BACKEND=VULKAN, using Vulkan Compute backend.")
+
+  find_package(Vulkan REQUIRED)
+  find_program(GLSLC_EXECUTABLE glslc
+    HINTS
+      ${Vulkan_GLSLC_EXECUTABLE}
+      "$ENV{VULKAN_SDK}/bin"
+      "$ENV{VK_SDK_PATH}/bin"
+  )
+  if(NOT GLSLC_EXECUTABLE)
+    # Fall back to glslangValidator (from the glslang-tools package)
+    find_program(GLSLC_EXECUTABLE glslangValidator)
+    if(GLSLC_EXECUTABLE)
+      # glslangValidator uses different flags: -V for SPIR-V, -o for output, --stdin for stage
+      set(GLSLC_FLAGS -V --target-env vulkan1.1 -S comp)
+      message(STATUS "glslc not found, using glslangValidator: ${GLSLC_EXECUTABLE}")
+    else()
+      message(FATAL_ERROR "Neither glslc nor glslangValidator found. Install 'glslc' (shaderc) or 'glslang-tools'.")
+    endif()
+  else()
+    set(GLSLC_FLAGS -fshader-stage=compute -O --target-env=vulkan1.1)
+    message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
+  endif()
+
+  set(SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/neuralnet/vulkan_shaders)
+  set(SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+  file(MAKE_DIRECTORY ${SHADER_GEN_DIR})
+
+  # Probe whether glslc accepts -O for a shader family; cache -O or -O0. No-op
+  # (leaves CACHE_VAR unset) for glslangValidator, which has no -O — the compile
+  # helper's glslangValidator branch ignores the flag anyway. Include the source
+  # hash in the cache key: optimizer support can change when a shader is edited,
+  # so an old -O0 fallback must not silently survive a source improvement.
+  function(katago_probe_glslc_opt_level CACHE_VAR PROBE_SRC TARGET_ENV DESC)
+    if(NOT GLSLC_EXECUTABLE MATCHES "glslc")
+      return()
+    endif()
+    file(SHA256 ${PROBE_SRC} _source_hash)
+    set(_hash_var "${CACHE_VAR}_SOURCE_HASH")
+    if(DEFINED ${CACHE_VAR} AND DEFINED ${_hash_var} AND
+       "${${_hash_var}}" STREQUAL "${_source_hash}")
+      return()
+    endif()
+    set(_probe_out ${CMAKE_BINARY_DIR}/CMakeFiles/${CACHE_VAR}_probe.spv)
+    set(_probe_defines ${ARGN})
+    execute_process(
+      COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute -O ${_probe_defines} --target-env=${TARGET_ENV}
+              ${PROBE_SRC} -o ${_probe_out}
+      RESULT_VARIABLE _res OUTPUT_QUIET ERROR_QUIET)
+    file(REMOVE ${_probe_out})
+    if(_res EQUAL 0)
+      set(${CACHE_VAR} "-O" CACHE INTERNAL "glslc optimization flag for ${DESC} shaders")
+      message(STATUS "glslc accepts -O for ${DESC} shaders; they will be optimized")
+    else()
+      set(${CACHE_VAR} "-O0" CACHE INTERNAL "glslc optimization flag for ${DESC} shaders")
+      message(STATUS "glslc rejects -O for ${DESC} shaders; compiling with -O0")
+    endif()
+    set(${_hash_var} "${_source_hash}" CACHE INTERNAL "source hash probed for ${DESC} shaders")
+  endfunction()
+
+  # Probe whether the shader compiler can emit SPV_KHR_float_controls execution
+  # mode RoundingModeRTE for 16-bit floats. If yes, we build a second SPIR-V
+  # variant for each shader and select it at runtime only on devices whose
+  # shaderRoundingModeRTEFloat16 property permits it.
+  function(katago_probe_rte_f16_shader_support)
+    if(DEFINED KATAGO_HAS_RTE_F16_SHADERS)
+      return()
+    endif()
+    set(_rte_probe_src ${CMAKE_BINARY_DIR}/CMakeFiles/rte_f16_probe.comp)
+    set(_rte_probe_out ${CMAKE_BINARY_DIR}/CMakeFiles/rte_f16_probe.spv)
+    file(WRITE ${_rte_probe_src}
+      "#version 450\n"
+      "#extension GL_EXT_spirv_intrinsics : require\n"
+      "#ifdef KATAGO_VULKAN_RTE_F16\n"
+      "spirv_execution_mode(extensions = [\"SPV_KHR_float_controls\"], capabilities = [4467], 4462, 16);\n"
+      "#endif\n"
+      "layout(local_size_x = 1) in;\n"
+      "void main() {}\n"
+    )
+    if(GLSLC_EXECUTABLE MATCHES "glslc")
+      set(_rte_probe_command
+        ${GLSLC_EXECUTABLE} -fshader-stage=compute -O0 -DKATAGO_VULKAN_RTE_F16=1 --target-env=vulkan1.1
+        ${_rte_probe_src} -o ${_rte_probe_out})
+    else()
+      set(_rte_probe_command
+        ${GLSLC_EXECUTABLE} -V --target-env vulkan1.1 -S comp -DKATAGO_VULKAN_RTE_F16=1
+        ${_rte_probe_src} -o ${_rte_probe_out})
+    endif()
+    execute_process(
+      COMMAND ${_rte_probe_command}
+      RESULT_VARIABLE _rte_probe_result
+      OUTPUT_VARIABLE _rte_probe_stdout
+      ERROR_VARIABLE _rte_probe_stderr
+    )
+    set(_rte_probe_verified TRUE)
+    if(_rte_probe_result EQUAL 0)
+      find_program(SPIRV_DIS_EXECUTABLE spirv-dis HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VK_SDK_PATH}/bin")
+      if(SPIRV_DIS_EXECUTABLE)
+        execute_process(
+          COMMAND ${SPIRV_DIS_EXECUTABLE} ${_rte_probe_out}
+          RESULT_VARIABLE _rte_probe_dis_result
+          OUTPUT_VARIABLE _rte_probe_dis_output
+          ERROR_QUIET
+        )
+        if(NOT _rte_probe_dis_result EQUAL 0)
+          set(_rte_probe_verified FALSE)
+        endif()
+        string(FIND "${_rte_probe_dis_output}" "OpExtension \"SPV_KHR_float_controls\"" _rte_probe_ext_pos)
+        string(FIND "${_rte_probe_dis_output}" "OpExecutionMode %main RoundingModeRTE 16" _rte_probe_mode_pos)
+        if(_rte_probe_ext_pos EQUAL -1 OR _rte_probe_mode_pos EQUAL -1)
+          set(_rte_probe_verified FALSE)
+        endif()
+      endif()
+    endif()
+    file(REMOVE ${_rte_probe_src} ${_rte_probe_out})
+    if(_rte_probe_result EQUAL 0 AND _rte_probe_verified)
+      set(KATAGO_HAS_RTE_F16_SHADERS ON CACHE INTERNAL "shader toolchain supports SPV_KHR_float_controls RTE f16")
+      message(STATUS "Shader toolchain supports SPV_KHR_float_controls RoundingModeRTE f16; building RTE shader variants")
+    else()
+      set(KATAGO_HAS_RTE_F16_SHADERS OFF CACHE INTERNAL "shader toolchain supports SPV_KHR_float_controls RTE f16")
+      message(STATUS "${ColorRed}Shader toolchain cannot emit SPV_KHR_float_controls RoundingModeRTE f16; RTE shader variants disabled.${ColorReset}")
+      message(STATUS "RTE f16 probe command: ${_rte_probe_command}")
+      if(NOT "${_rte_probe_stdout}" STREQUAL "")
+        message(STATUS "RTE f16 probe stdout:\n${_rte_probe_stdout}")
+      endif()
+      if(NOT "${_rte_probe_stderr}" STREQUAL "")
+        message(STATUS "RTE f16 probe stderr:\n${_rte_probe_stderr}")
+      endif()
+    endif()
+  endfunction()
+
+  # Probe whether the shader toolchain can compile a representative shader for a
+  # shader capability family (coopmat1/coopmat2), caching the result ON/OFF in
+  # CACHE_VAR so a configure re-run does not re-probe. On failure the offending
+  # command and its stdout/stderr are printed to help diagnose toolchain gaps.
+  function(katago_probe_shader_family CACHE_VAR FAMILY CAPABILITY PROBE_SRC TARGET_ENV)
+    if(DEFINED ${CACHE_VAR})
+      return()
+    endif()
+    set(_probe_out ${CMAKE_BINARY_DIR}/CMakeFiles/${FAMILY}_probe.spv)
+    if(GLSLC_EXECUTABLE MATCHES "glslc")
+      set(_probe_command
+        ${GLSLC_EXECUTABLE} -fshader-stage=compute -O0 --target-env=${TARGET_ENV} ${PROBE_SRC} -o ${_probe_out})
+    else()
+      set(_probe_command
+        ${GLSLC_EXECUTABLE} -V --target-env ${TARGET_ENV} -S comp ${PROBE_SRC} -o ${_probe_out})
+    endif()
+    execute_process(
+      COMMAND ${_probe_command}
+      RESULT_VARIABLE _probe_result
+      OUTPUT_VARIABLE _probe_stdout
+      ERROR_VARIABLE _probe_stderr)
+    file(REMOVE ${_probe_out})
+    if(_probe_result EQUAL 0)
+      set(${CACHE_VAR} ON CACHE INTERNAL "glslc/glslang supports ${CAPABILITY}")
+      message(STATUS "Shader toolchain supports ${CAPABILITY}; building ${FAMILY} shaders")
+    else()
+      set(${CACHE_VAR} OFF CACHE INTERNAL "glslc/glslang supports ${CAPABILITY}")
+      message(STATUS "${ColorRed}Shader toolchain lacks ${CAPABILITY} support; ${FAMILY} path disabled (backend falls back). Upgrade shaderc/glslang to enable it.${ColorReset}")
+      message(STATUS "${FAMILY} probe command: ${_probe_command}")
+      if(NOT "${_probe_stdout}" STREQUAL "")
+        message(STATUS "${FAMILY} probe stdout:\n${_probe_stdout}")
+      endif()
+      if(NOT "${_probe_stderr}" STREQUAL "")
+        message(STATUS "${FAMILY} probe stderr:\n${_probe_stderr}")
+      endif()
+    endif()
+  endfunction()
+
+
+  # add_custom_command per shader in ARGN; append each .spv to the list named by
+  # OUT_VAR in the caller (directory) scope. Branches glslc vs glslangValidator;
+  # OPT_LEVEL/TARGET_ENV are per-family. OPT_LEVEL is ignored on the glslangValidator
+  # path (empty is fine there).
+  function(katago_compile_shader_group OUT_VAR OPT_LEVEL TARGET_ENV DESC)
+    set(_outputs ${${OUT_VAR}})
+    foreach(GLSL_FILE ${ARGN})
+      string(REPLACE ".glsl" ".spv" SPV_FILE ${GLSL_FILE})
+      katago_compile_shader(_outputs ${OPT_LEVEL} ${TARGET_ENV} "${DESC}" ${GLSL_FILE} ${SPV_FILE})
+    endforeach()
+    set(${OUT_VAR} ${_outputs} PARENT_SCOPE)
+  endfunction()
+
+  # Compile an additional named SPIR-V variant from an existing GLSL source.
+  # This is used for accumulator-type variants whose source is otherwise
+  # identical, keeping the native convolution implementations in lockstep.
+  function(katago_compile_shader_variant OUT_VAR OPT_LEVEL TARGET_ENV DESC SOURCE_FILE OUTPUT_FILE)
+    set(_variant_outputs ${${OUT_VAR}})
+    katago_compile_shader(_variant_outputs ${OPT_LEVEL} ${TARGET_ENV} "${DESC}" ${SOURCE_FILE} ${OUTPUT_FILE} ${ARGN})
+    set(${OUT_VAR} ${_variant_outputs} PARENT_SCOPE)
+  endfunction()
+
+  # Single-shader core shared by the group and variant helpers. SOURCE_FILE is
+  # the .glsl under SHADER_SRC_DIR, OUTPUT_FILE the .spv name under SHADER_GEN_DIR
+  # (the group derives it from the source name; the variant passes it explicitly).
+  # Remaining ARGN entries are -D defines applied to both the normal and RTE compile.
+  function(katago_compile_shader OUT_VAR OPT_LEVEL TARGET_ENV DESC SOURCE_FILE OUTPUT_FILE)
+    set(_outputs ${${OUT_VAR}})
+    set(SPV_PATH ${SHADER_GEN_DIR}/${OUTPUT_FILE})
+    set(_defines "")
+    foreach(_def ${ARGN})
+      list(APPEND _defines -D${_def})
+    endforeach()
+    if(GLSLC_EXECUTABLE MATCHES "glslc")
+      add_custom_command(OUTPUT ${SPV_PATH}
+        COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute ${OPT_LEVEL} ${_defines}
+                --target-env=${TARGET_ENV} ${SHADER_SRC_DIR}/${SOURCE_FILE} -o ${SPV_PATH}
+        DEPENDS ${SHADER_SRC_DIR}/${SOURCE_FILE}
+        COMMENT "Compiling ${DESC}shader ${SOURCE_FILE} to SPIR-V (${OPT_LEVEL})" VERBATIM)
+    else()
+      add_custom_command(OUTPUT ${SPV_PATH}
+        COMMAND ${GLSLC_EXECUTABLE} -V --target-env ${TARGET_ENV} -S comp ${_defines}
+                ${SHADER_SRC_DIR}/${SOURCE_FILE} -o ${SPV_PATH}
+        DEPENDS ${SHADER_SRC_DIR}/${SOURCE_FILE}
+        COMMENT "Compiling ${DESC}shader ${SOURCE_FILE} to SPIR-V" VERBATIM)
+    endif()
+    list(APPEND _outputs ${SPV_PATH})
+    if(KATAGO_HAS_RTE_F16_SHADERS)
+      string(REPLACE ".spv" "_rte.spv" RTE_OUTPUT_FILE ${OUTPUT_FILE})
+      set(RTE_SPV_PATH ${SHADER_GEN_DIR}/${RTE_OUTPUT_FILE})
+      if(GLSLC_EXECUTABLE MATCHES "glslc")
+        add_custom_command(OUTPUT ${RTE_SPV_PATH}
+          COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute ${OPT_LEVEL} ${_defines}
+                  -DKATAGO_VULKAN_RTE_F16=1 --target-env=${TARGET_ENV}
+                  ${SHADER_SRC_DIR}/${SOURCE_FILE} -o ${RTE_SPV_PATH}
+          DEPENDS ${SHADER_SRC_DIR}/${SOURCE_FILE}
+          COMMENT "Compiling ${DESC}RTE shader ${RTE_OUTPUT_FILE} to SPIR-V (${OPT_LEVEL})" VERBATIM)
+      else()
+        add_custom_command(OUTPUT ${RTE_SPV_PATH}
+          COMMAND ${GLSLC_EXECUTABLE} -V --target-env ${TARGET_ENV} -S comp ${_defines}
+                  -DKATAGO_VULKAN_RTE_F16=1 ${SHADER_SRC_DIR}/${SOURCE_FILE} -o ${RTE_SPV_PATH}
+          DEPENDS ${SHADER_SRC_DIR}/${SOURCE_FILE}
+          COMMENT "Compiling ${DESC}RTE shader ${RTE_OUTPUT_FILE} to SPIR-V" VERBATIM)
+      endif()
+      list(APPEND _outputs ${RTE_SPV_PATH})
+    endif()
+    set(${OUT_VAR} ${_outputs} PARENT_SCOPE)
+  endfunction()
+
+  katago_probe_rte_f16_shader_support()
+
+  set(GLSL_SHADER_FILES
+    winograd_transform_nhwc.glsl
+    winograd_untransform_nhwc.glsl
+    conv2d_direct_nhwc.glsl
+    scale_bias_mask_act_nhwc.glsl
+    scale_bias_mask_act_inplace_nhwc.glsl
+    nchw_to_nhwc_smallchannel.glsl
+    nchw_to_nhwc_tiled.glsl
+    winograd_gemm_tiled.glsl
+    gemm_strided_tiled_nhwc.glsl
+    gemm_direct_fp32.glsl
+    add_channel_biases_nhwc.glsl
+    add_cbias_act_nc.glsl
+    add_pointwise.glsl
+    extract_channel0_nhwc.glsl
+    sum_mask_spatial.glsl
+    gpool_mask_nhwc.glsl
+    value_head_pool_nhwc.glsl
+    transformer_rmsnorm_nhwc.glsl
+    transformer_rmsnorm_nhwc_subgroup.glsl
+    transformer_spatial_rmsnorm_pass2.glsl
+    transformer_spatial_rmsnorm_pass2_subgroup.glsl
+    transformer_spatial_rmsnorm_nhwc_pass1.glsl
+    transformer_spatial_rmsnorm_nhwc_pass3.glsl
+    transformer_attention_tiled_nhwc.glsl
+    transformer_swiglu.glsl
+  )
+
+  set(SPIRV_OUTPUTS "")
+  katago_compile_shader_group(SPIRV_OUTPUTS "-O" vulkan1.1 "GLSL " ${GLSL_SHADER_FILES})
+
+  # DOT2 shaders use SPV_VALVE_mixed_float_dot_product (capability ids 6912/6913).
+  # Older SPIRV-Tools rejects this as an unknown capability during optimization.
+  # Probe glslc at configure time: try compiling an AccF16 DOT2 shader with -O, and
+  # cache whether that toolchain accepts it. Then hard-code the resulting flag
+  # into the per-shader add_custom_command (portable: no sh -c fallback).
+  # After a glslc/SPIRV-Tools upgrade, remove CMakeCache.txt or configure with
+  # -U KATAGO_GLSLC_DOT2_MIXED_OPT_LEVEL to force this cached probe to run again.
+  set(GLSL_DOT2_SHADER_FILES
+    winograd_gemm_dot2_accf32.glsl
+    transformer_attention_dot2_accf32_nhwc.glsl
+    winograd_gemm_dot2_accf16.glsl
+    gemm_strided_dot2_accf32_nhwc.glsl
+    gemm_strided_dot2_accf16_nhwc.glsl
+  )
+  katago_probe_glslc_opt_level(KATAGO_GLSLC_DOT2_MIXED_OPT_LEVEL
+    ${SHADER_SRC_DIR}/gemm_strided_dot2_accf16_nhwc.glsl vulkan1.1 "DOT2")
+  katago_compile_shader_group(SPIRV_OUTPUTS ${KATAGO_GLSLC_DOT2_MIXED_OPT_LEVEL}
+    vulkan1.1 "DOT2 GLSL " ${GLSL_DOT2_SHADER_FILES})
+
+  # Cooperative-matrix (coopmat1, VK_KHR_cooperative_matrix) GEMM shaders.
+  # Compiled with --target-env=vulkan1.1 (which still emits SPIR-V 1.3, the
+  # minimum the coopmat types require) for the widest driver compatibility — a
+  # vulkan1.3 target would emit SPIR-V 1.6 and needlessly narrow it.
+  set(GLSL_COOPMAT_SHADER_FILES
+    winograd_gemm_coopmat1_accf32.glsl
+    winograd_gemm_coopmat1_accf16.glsl
+    gemm_strided_coopmat1_accf16_nhwc.glsl
+    conv_implicit_gemm_coopmat1_accf32_nhwc.glsl
+    gemm_strided_coopmat1_accf32_nhwc.glsl
+    transformer_attention_coopmat1_nhwc.glsl
+    transformer_attention_coopmat1_split_k_nhwc.glsl
+    transformer_attention_split_k_resolve_nhwc.glsl
+  )
+  # Probe the toolchain for GL_KHR_cooperative_matrix support at configure time.
+  # Old shaderc/glslang lack it; rather than fail the whole Vulkan build for
+  # users who have no coopmat hardware anyway, skip the coopmat shaders and let
+  # the backend fall back (guarded by KATAGO_VULKAN_HAS_COOPMAT_SHADERS in C++).
+  # Force a re-probe after a toolchain upgrade with -U KATAGO_HAS_COOPMAT_SHADERS.
+  if(NOT DEFINED KATAGO_HAS_COOPMAT_SHADERS)
+    katago_probe_shader_family(KATAGO_HAS_COOPMAT_SHADERS "coopmat GEMM" "GL_KHR_cooperative_matrix"
+      ${SHADER_SRC_DIR}/winograd_gemm_coopmat1_accf32.glsl vulkan1.1)
+  endif()
+  if(KATAGO_HAS_COOPMAT_SHADERS)
+    katago_probe_glslc_opt_level(KATAGO_GLSLC_COOPMAT_OPT_LEVEL
+      ${SHADER_SRC_DIR}/winograd_gemm_coopmat1_accf32.glsl vulkan1.1 "coopmat GLSL")
+    katago_compile_shader_group(SPIRV_OUTPUTS ${KATAGO_GLSLC_COOPMAT_OPT_LEVEL}
+      vulkan1.1 "coopmat GLSL " ${GLSL_COOPMAT_SHADER_FILES})
+    # maintenance1 is optional. Its register-softmax path lives in distinct
+    # shaders rather than being preprocessor-selected inside the portable pair.
+    if(NOT DEFINED KATAGO_HAS_COOPMAT_MAINTENANCE1_SHADERS)
+      set(_coopmat_maint1_probe_out ${CMAKE_BINARY_DIR}/CMakeFiles/coopmat_maint1_probe.spv)
+      execute_process(
+        COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute -O0 --target-env=vulkan1.1
+                ${SHADER_SRC_DIR}/transformer_attention_coopmat1_maintenance1_nhwc.glsl -o ${_coopmat_maint1_probe_out}
+        RESULT_VARIABLE _coopmat_maint1_probe_result OUTPUT_QUIET ERROR_QUIET)
+      file(REMOVE ${_coopmat_maint1_probe_out})
+      set(KATAGO_HAS_COOPMAT_MAINTENANCE1_SHADERS ${_coopmat_maint1_probe_result} CACHE INTERNAL
+        "glslc cooperative matrix maintenance1 probe result")
+      if(_coopmat_maint1_probe_result EQUAL 0)
+        set(KATAGO_HAS_COOPMAT_MAINTENANCE1_SHADERS ON CACHE INTERNAL "" FORCE)
+      else()
+        set(KATAGO_HAS_COOPMAT_MAINTENANCE1_SHADERS OFF CACHE INTERNAL "" FORCE)
+      endif()
+    endif()
+    if(KATAGO_HAS_COOPMAT_MAINTENANCE1_SHADERS)
+      katago_probe_glslc_opt_level(KATAGO_GLSLC_COOPMAT_MAINT1_OPT_LEVEL
+        ${SHADER_SRC_DIR}/transformer_attention_coopmat1_maintenance1_nhwc.glsl vulkan1.1 "coopmat maintenance1")
+      katago_compile_shader_group(SPIRV_OUTPUTS ${KATAGO_GLSLC_COOPMAT_MAINT1_OPT_LEVEL}
+        vulkan1.1 "coopmat maintenance1 " transformer_attention_coopmat1_maintenance1_nhwc.glsl transformer_attention_coopmat1_maintenance1_split_k_nhwc.glsl)
+    endif()
+    katago_compile_shader_variant(
+      SPIRV_OUTPUTS ${KATAGO_GLSLC_COOPMAT_OPT_LEVEL} vulkan1.1 "coopmat AccF16 "
+      conv_implicit_gemm_coopmat1_accf32_nhwc.glsl
+      conv_implicit_gemm_coopmat1_accf16_nhwc.spv
+      KATAGO_VULKAN_ACCUMULATE_FP16=1)
+  endif()
+
+  # Cooperative-matrix2 (VK_NV_cooperative_matrix2) GEMM shaders. These require
+  # SPV_NV_cooperative_matrix2 / SPV_NV_tensor_addressing, which require SPIR-V
+  # 1.6, so target Vulkan 1.3.
+  set(GLSL_COOPMAT2_SHADER_FILES
+    winograd_gemm_coopmat2_accf32.glsl
+    winograd_gemm_coopmat2_accf16.glsl
+    gemm_strided_coopmat2_accf16_nhwc.glsl
+    conv_implicit_gemm_coopmat2_accf32_nhwc.glsl
+    gemm_strided_coopmat2_accf32_nhwc.glsl
+    transformer_attention_coopmat2_accf32_nhwc.glsl
+  )
+  # The probe shader exercises every coopmat2 op the backend's shaders use (tensor
+  # addressing, block loads, reductions, per-element operations, and conversions),
+  # so a successful compile confirms the toolchain can build them all. Which
+  # optional device feature bits the driver provides is queried at runtime via
+  # vkGetPhysicalDeviceFeatures2, not here.
+  if(NOT DEFINED KATAGO_HAS_COOPMAT2_SHADERS)
+    katago_probe_shader_family(KATAGO_HAS_COOPMAT2_SHADERS "coopmat2 GEMM" "GL_NV_cooperative_matrix2"
+      ${SHADER_SRC_DIR}/coopmat2_probe.glsl vulkan1.3)
+  endif()
+  # Compile coopmat2 shaders only when supported.
+  if(KATAGO_HAS_COOPMAT2_SHADERS)
+    katago_probe_glslc_opt_level(KATAGO_GLSLC_COOPMAT2_OPT_LEVEL
+      ${SHADER_SRC_DIR}/gemm_strided_coopmat2_accf32_nhwc.glsl vulkan1.3 "coopmat2 GLSL")
+    katago_compile_shader_group(SPIRV_OUTPUTS ${KATAGO_GLSLC_COOPMAT2_OPT_LEVEL}
+      vulkan1.3 "coopmat2 GLSL " ${GLSL_COOPMAT2_SHADER_FILES})
+    katago_compile_shader_variant(
+      SPIRV_OUTPUTS ${KATAGO_GLSLC_COOPMAT2_OPT_LEVEL} vulkan1.3 "coopmat2 AccF16 "
+      conv_implicit_gemm_coopmat2_accf32_nhwc.glsl
+      conv_implicit_gemm_coopmat2_accf16_nhwc.spv
+      KATAGO_VULKAN_ACCUMULATE_FP16=1)
+  endif()
+
+
+  set(GENERATED_CPP ${SHADER_GEN_DIR}/vulkanshaders_generated.cpp)
+  set(GENERATED_H   ${SHADER_GEN_DIR}/vulkanshaders_generated.h)
+  set(SPIRV_MANIFEST ${SHADER_GEN_DIR}/vulkanshaders_spv_files.txt)
+
+  string(REPLACE ";" "\n" SPIRV_MANIFEST_CONTENT "${SPIRV_OUTPUTS}")
+  file(WRITE ${SPIRV_MANIFEST} "${SPIRV_MANIFEST_CONTENT}\n")
+
+  add_custom_command(
+    OUTPUT ${GENERATED_CPP} ${GENERATED_H}
+    COMMAND ${CMAKE_COMMAND}
+            -DSPV_MANIFEST=${SPIRV_MANIFEST}
+            -DOUTPUT_CPP=${GENERATED_CPP}
+            -DOUTPUT_H=${GENERATED_H}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${SPIRV_OUTPUTS} ${SPIRV_MANIFEST} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    COMMENT "Embedding SPIR-V shaders into C++ arrays"
+    VERBATIM
+  )
+
+  set(NEURALNET_BACKEND_SOURCES
+    neuralnet/vulkanbackend.cpp
+    neuralnet/vulkanhelpers.cpp
+    neuralnet/vulkankernels.cpp
+    neuralnet/vulkanlayers.cpp
+    neuralnet/vulkantunebench.cpp
+    neuralnet/vulkantuneparams.cpp
+    neuralnet/vulkantuner.cpp
+    ${GENERATED_CPP}
+  )
+  include_directories(${SHADER_GEN_DIR})
 elseif(USE_BACKEND STREQUAL "")
   message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=TENSORRT or -DUSE_BACKEND=OPENCL or -DUSE_BACKEND=EIGEN to compile with the respective backend.${ColorReset}")
   set(NEURALNET_BACKEND_SOURCES neuralnet/dummybackend.cpp)
@@ -531,6 +945,19 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
       message(STATUS "Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
     endif()
   endif()
+elseif(USE_BACKEND STREQUAL "VULKAN")
+  target_compile_definitions(katago PRIVATE USE_VULKAN_BACKEND)
+  if(KATAGO_HAS_COOPMAT_SHADERS)
+    target_compile_definitions(katago PRIVATE KATAGO_VULKAN_HAS_COOPMAT_SHADERS)
+    if(KATAGO_HAS_COOPMAT_MAINTENANCE1_SHADERS)
+      target_compile_definitions(katago PRIVATE KATAGO_VULKAN_HAS_COOPMAT_MAINTENANCE1_SHADERS)
+    endif()
+  endif()
+  if(KATAGO_HAS_COOPMAT2_SHADERS)
+    target_compile_definitions(katago PRIVATE KATAGO_VULKAN_HAS_COOPMAT2_SHADERS)
+  endif()
+  include_directories(SYSTEM ${Vulkan_INCLUDE_DIRS})
+  target_link_libraries(katago ${Vulkan_LIBRARIES})
 endif()
 
 if(USE_BIGGER_BOARDS_EXPENSIVE)
@@ -685,4 +1112,3 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "C
 endif()
 
 target_include_directories(katago PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-

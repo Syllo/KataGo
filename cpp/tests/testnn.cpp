@@ -335,6 +335,109 @@ static void testConvLayer(int64_t& numTestsRun) {
       testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,expected);
     }
 
+    // This shape is deliberately eligible for the Vulkan NHWC vec8 implicit
+    // GEMM path (M=64, N=64, C=64). It remains a normal reference test when
+    // the opt-in environment variable is absent, and exercises both layout
+    // boundary shaders when it is present.
+    {
+      string label("3x3 convolution coopmat NHWC boundary");
+      const int largeBatchSize = 1;
+      const int largeInChannels = 64;
+      const int largeOutChannels = 64;
+      const int largeNnXLen = 8;
+      const int largeNnYLen = 8;
+      vector<float> largeInput((size_t)largeBatchSize * largeInChannels * largeNnXLen * largeNnYLen);
+      vector<float> largeWeights((size_t)largeOutChannels * largeInChannels * 3 * 3);
+      for(size_t i = 0; i < largeInput.size(); i++)
+        largeInput[i] = (float)((int)(i % 23) - 11) * 0.03125f;
+      for(size_t i = 0; i < largeWeights.size(); i++)
+        largeWeights[i] = (float)((int)(i % 19) - 9) * 0.015625f;
+      vector<float> largeExpected((size_t)largeBatchSize * largeOutChannels * largeNnXLen * largeNnYLen, 0.0f);
+      for(int oc = 0; oc < largeOutChannels; oc++) {
+        for(int y = 0; y < largeNnYLen; y++) {
+          for(int x = 0; x < largeNnXLen; x++) {
+            float sum = 0.0f;
+            for(int ic = 0; ic < largeInChannels; ic++) {
+              for(int fy = 0; fy < 3; fy++) {
+                const int iy = y + fy - 1;
+                if(iy < 0 || iy >= largeNnYLen)
+                  continue;
+                for(int fx = 0; fx < 3; fx++) {
+                  const int ix = x + fx - 1;
+                  if(ix < 0 || ix >= largeNnXLen)
+                    continue;
+                  sum += largeInput[(size_t)ic * largeNnXLen * largeNnYLen + iy * largeNnXLen + ix] *
+                         largeWeights[((size_t)(oc * largeInChannels + ic) * 3 + fy) * 3 + fx];
+                }
+              }
+            }
+            largeExpected[(size_t)oc * largeNnXLen * largeNnYLen + y * largeNnXLen + x] = sum;
+          }
+        }
+      }
+      ConvLayerDesc largeDesc;
+      largeDesc.convYSize = 3;
+      largeDesc.convXSize = 3;
+      largeDesc.inChannels = largeInChannels;
+      largeDesc.outChannels = largeOutChannels;
+      largeDesc.dilationY = 1;
+      largeDesc.dilationX = 1;
+      largeDesc.weights = largeWeights;
+      testConfigurations(label, largeBatchSize, largeNnXLen, largeNnYLen, largeDesc, largeInput, largeExpected);
+    }
+
+    // Keep a 5x5 case at the same alignment boundary. This reaches the
+    // CONV_SIZE=5 pipeline specialization when native NHWC convolution is
+    // enabled, while still validating the generic convolution fallback.
+    {
+      string label("5x5 convolution coopmat NHWC boundary");
+      const int largeBatchSize = 1;
+      const int largeInChannels = 64;
+      const int largeOutChannels = 64;
+      const int largeNnXLen = 8;
+      const int largeNnYLen = 8;
+      constexpr int convSize = 5;
+      constexpr int convRadius = convSize / 2;
+      vector<float> largeInput((size_t)largeBatchSize * largeInChannels * largeNnXLen * largeNnYLen);
+      vector<float> largeWeights((size_t)largeOutChannels * largeInChannels * convSize * convSize);
+      for(size_t i = 0; i < largeInput.size(); i++)
+        largeInput[i] = (float)((int)(i % 29) - 14) * 0.0234375f;
+      for(size_t i = 0; i < largeWeights.size(); i++)
+        largeWeights[i] = (float)((int)(i % 31) - 15) * 0.01171875f;
+      vector<float> largeExpected((size_t)largeBatchSize * largeOutChannels * largeNnXLen * largeNnYLen, 0.0f);
+      for(int oc = 0; oc < largeOutChannels; oc++) {
+        for(int y = 0; y < largeNnYLen; y++) {
+          for(int x = 0; x < largeNnXLen; x++) {
+            float sum = 0.0f;
+            for(int ic = 0; ic < largeInChannels; ic++) {
+              for(int fy = 0; fy < convSize; fy++) {
+                const int iy = y + fy - convRadius;
+                if(iy < 0 || iy >= largeNnYLen)
+                  continue;
+                for(int fx = 0; fx < convSize; fx++) {
+                  const int ix = x + fx - convRadius;
+                  if(ix < 0 || ix >= largeNnXLen)
+                    continue;
+                  sum += largeInput[(size_t)ic * largeNnXLen * largeNnYLen + iy * largeNnXLen + ix] *
+                         largeWeights[((size_t)(oc * largeInChannels + ic) * convSize + fy) * convSize + fx];
+                }
+              }
+            }
+            largeExpected[(size_t)oc * largeNnXLen * largeNnYLen + y * largeNnXLen + x] = sum;
+          }
+        }
+      }
+      ConvLayerDesc largeDesc;
+      largeDesc.convYSize = convSize;
+      largeDesc.convXSize = convSize;
+      largeDesc.inChannels = largeInChannels;
+      largeDesc.outChannels = largeOutChannels;
+      largeDesc.dilationY = 1;
+      largeDesc.dilationX = 1;
+      largeDesc.weights = largeWeights;
+      testConfigurations(label, largeBatchSize, largeNnXLen, largeNnYLen, largeDesc, largeInput, largeExpected);
+    }
+
   }
 
 
@@ -473,6 +576,54 @@ static void testBatchNormLayer(int64_t& numTestsRun) {
 
   }
 
+  // Exercise the direct Vulkan NHWC test path with both the vec4 channel
+  // specialization and an explicit non-multiple-of-four scalar tail.
+  auto testGeneratedChannels = [&](int numChannels, bool masked, const string& label) {
+    const int batchSize = 2;
+    const int nnYLen = 3;
+    const int nnXLen = 5;
+    const int nnXYLen = nnXLen * nnYLen;
+
+    BatchNormLayerDesc desc;
+    desc.numChannels = numChannels;
+    desc.epsilon = 0.125f;
+    desc.hasScale = true;
+    desc.hasBias = true;
+    desc.mean.resize(numChannels);
+    desc.variance.resize(numChannels);
+    desc.scale.resize(numChannels);
+    desc.bias.resize(numChannels);
+    for(int c = 0; c < numChannels; c++) {
+      desc.mean[c] = (float)(c - 2) * 0.125f;
+      desc.variance[c] = 0.75f + (float)(c % 3) * 0.25f;
+      desc.scale[c] = 0.5f + (float)(c % 5) * 0.125f;
+      desc.bias[c] = (float)(3 - c) * 0.0625f;
+    }
+    desc.computeMerged();
+
+    vector<float> input((size_t)batchSize * numChannels * nnXYLen);
+    vector<float> mask((size_t)batchSize * nnXYLen, 1.0f);
+    vector<float> expected(input.size());
+    for(size_t i = 0; i < input.size(); i++)
+      input[i] = (float)((int)(i % 29) - 14) * 0.09375f;
+    if(masked) {
+      for(size_t i = 0; i < mask.size(); i++)
+        mask[i] = (i % 7 == 2 || i % 11 == 5) ? 0.0f : 1.0f;
+    }
+    for(int n = 0; n < batchSize; n++) {
+      for(int c = 0; c < numChannels; c++) {
+        for(int xy = 0; xy < nnXYLen; xy++) {
+          size_t idx = ((size_t)n * numChannels + c) * nnXYLen + xy;
+          expected[idx] = (input[idx] * desc.mergedScale[c] + desc.mergedBias[c]) * mask[n * nnXYLen + xy];
+        }
+      }
+    }
+    testConfigurations(label, batchSize, nnXLen, nnYLen, desc, input, mask, expected);
+  };
+
+  testGeneratedChannels(8, false, "Batch norm vec4 channels");
+  testGeneratedChannels(8, true, "Batch norm vec4 channels with mask");
+  testGeneratedChannels(5, true, "Batch norm scalar channel tail");
 }
 
 
@@ -623,16 +774,35 @@ static void testResidualBlock(int64_t& numTestsRun) {
     //0,0,0,0,
 
 
-    //Sum pointwise
+    // Sum pointwise. Use a center-only 3x3 kernel so Vulkan's Winograd final-conv path
+    //  exercises fused residual addition while preserving the same expected values.
     desc.finalConv.name = "finalConv";
-    desc.finalConv.convYSize = 1;
-    desc.finalConv.convXSize = 1;
+    desc.finalConv.convYSize = 3;
+    desc.finalConv.convXSize = 3;
     desc.finalConv.inChannels = midChannels;
     desc.finalConv.outChannels = trunkChannels;
     desc.finalConv.dilationY = 1;
     desc.finalConv.dilationX = 1;
     desc.finalConv.weights = vector<float>({
-        1,1
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
     });
 
     //0,4,0,0,
@@ -674,6 +844,13 @@ static void testResidualBlock(int64_t& numTestsRun) {
         2, 5, -3, 0,
         1, 4, 1, 1,
     });
+
+    testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,mask,expected);
+
+    label = "Basic residual block 1x1 final";
+    desc.finalConv.convYSize = 1;
+    desc.finalConv.convXSize = 1;
+    desc.finalConv.weights = vector<float>({1, 1});
 
     testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,mask,expected);
   }
@@ -879,16 +1056,25 @@ static void testGlobalPoolingResidualBlock(int64_t& numTestsRun) {
 
     //Relu gets applied, should hit nothing in this case
 
-    //Identity map
+    // Identity map. Use a center-only 3x3 kernel so Vulkan's Winograd final-conv path
+    //  exercises fused residual addition while preserving the same expected values.
     desc.finalConv.name = "finalConv";
-    desc.finalConv.convYSize = 1;
-    desc.finalConv.convXSize = 1;
+    desc.finalConv.convYSize = 3;
+    desc.finalConv.convXSize = 3;
     desc.finalConv.inChannels = regularChannels;
     desc.finalConv.outChannels = trunkChannels;
     desc.finalConv.dilationY = 1;
     desc.finalConv.dilationX = 1;
     desc.finalConv.weights = vector<float>({
-        1
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
     });
 
     vector<float> expected({
@@ -915,6 +1101,13 @@ static void testGlobalPoolingResidualBlock(int64_t& numTestsRun) {
       );
       expected[i] *= mask[i];
     }
+
+    testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,mask,expected);
+
+    label = "Global pooling residual block 1x1 final";
+    desc.finalConv.convYSize = 1;
+    desc.finalConv.convXSize = 1;
+    desc.finalConv.weights = vector<float>({1});
 
     testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,mask,expected);
   }

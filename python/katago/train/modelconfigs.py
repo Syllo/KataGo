@@ -2809,6 +2809,14 @@ b10c384h6nbttflrs = {
     "v2_size":96,
 }
 
+# Test model with non-multiple-of-8 attention head dims, used to exercise the
+# Vulkan backend's head-dim padding (coopmat/dot2 attention on padded heads).
+b10c384h6nbttflrs_padtest = {
+    **b10c384h6nbttflrs,
+    "attention_query_head_dim": 36,
+    "attention_value_head_dim": 36,
+}
+
 # b28c512nbt-comparable tier copies/variants
 b35c256h8tfrs = {
     "version":17,
@@ -3190,6 +3198,7 @@ base_config_of_name = {
     "b16c256h8tfrs": b16c256h8tfrs,
     "b22c192h6tfrs": b22c192h6tfrs,
     "b10c384h6nbttflrs": b10c384h6nbttflrs,
+    "b10c384h6nbttflrs_padtest": b10c384h6nbttflrs_padtest,
 
     # b28c512nbt-comparable tier
     "b20c384h12tfrs": b20c384h12tfrs,

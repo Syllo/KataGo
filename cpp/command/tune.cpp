@@ -11,13 +11,19 @@
 #include "../neuralnet/opencltuner.h"
 #endif
 
+#ifdef USE_VULKAN_BACKEND
+#include "../neuralnet/vulkantuner.h"
+#endif
+
 using namespace std;
 
 int MainCmds::tuner(const vector<string>& args) {
-#ifndef USE_OPENCL_BACKEND
-  cout << "Currently this command only does anything for the OpenCL version of KataGo" << endl;
+#if !defined(USE_OPENCL_BACKEND) && !defined(USE_VULKAN_BACKEND)
+  cout << "Currently this command only does anything for the OpenCL and Vulkan versions of KataGo" << endl;
   (void)args;
   return 0;
+#elif defined(USE_VULKAN_BACKEND)
+  return VulkanTuner::runTuneCommand(args);
 #else
 
   ConfigParser cfg;

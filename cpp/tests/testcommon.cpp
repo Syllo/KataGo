@@ -83,6 +83,16 @@ void TestCommon::overrideForBackends(bool& inputsNHWC, bool& useNHWC) {
     cout << "Backend is TensorRT, ignoring args and forcing useNHWC=false" << endl;
     useNHWC = false;
   }
+#elif defined(USE_VULKAN_BACKEND)
+  // useNHWC is routed to cudaUseNHWC (see testsearchcommon.cpp) and is read only
+  // by the CUDA backend; Vulkan never reads it, so forcing it here is a no-op.
+  if(useNHWC != false) {
+    cout << "Backend is vulkan, ignoring args and forcing useNHWC=false" << endl;
+    useNHWC = false;
+  }
+  // Vulkan is input-layout agnostic: it accepts both NCHW and NHWC inputs, so
+  // leave inputsNHWC (= externalInputsUseNhwc) exactly as the caller passed it.
+  (void)inputsNHWC;
 #else
   (void)inputsNHWC;
   (void)useNHWC;
