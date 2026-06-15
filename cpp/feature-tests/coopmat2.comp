@@ -1,0 +1,46 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_NV_cooperative_matrix2 : require
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer A {
+  float16_t data_a[];
+};
+layout(binding = 1) readonly buffer B {
+  float16_t data_b[];
+};
+layout(binding = 2) buffer C {
+  float16_t data_c[];
+};
+
+void main() {
+  tensorLayoutNV<2, gl_CooperativeMatrixClampModeConstantNV> layoutA =
+    createTensorLayoutNV(2, gl_CooperativeMatrixClampModeConstantNV);
+  tensorLayoutNV<2, gl_CooperativeMatrixClampModeConstantNV> layoutB =
+    createTensorLayoutNV(2, gl_CooperativeMatrixClampModeConstantNV);
+  tensorLayoutNV<2, gl_CooperativeMatrixClampModeConstantNV> layoutC =
+    createTensorLayoutNV(2, gl_CooperativeMatrixClampModeConstantNV);
+  layoutA = setTensorLayoutDimensionNV(layoutA, 16, 16);
+  layoutB = setTensorLayoutDimensionNV(layoutB, 16, 16);
+  layoutC = setTensorLayoutDimensionNV(layoutC, 16, 16);
+  layoutA = setTensorLayoutStrideNV(layoutA, 1, 16);
+  layoutB = setTensorLayoutStrideNV(layoutB, 1, 16);
+  layoutC = setTensorLayoutStrideNV(layoutC, 16, 1);
+  tensorViewNV<2, false, 1, 0> transpose = createTensorViewNV(2, false, 1, 0);
+
+  coopmat<float16_t, gl_ScopeWorkgroup, 16, 16, gl_MatrixUseA> a;
+  coopmat<float16_t, gl_ScopeWorkgroup, 16, 16, gl_MatrixUseB> b;
+  coopmat<float, gl_ScopeWorkgroup, 16, 16, gl_MatrixUseAccumulator> acc =
+    coopmat<float, gl_ScopeWorkgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopMatLoadTensorNV(a, data_a, 0, sliceTensorLayoutNV(layoutA, 0, 16, 0, 16));
+  coopMatLoadTensorNV(b, data_b, 0, sliceTensorLayoutNV(layoutB, 0, 16, 0, 16), transpose);
+  acc = coopMatMulAdd(a, b, acc);
+  coopmat<float16_t, gl_ScopeWorkgroup, 16, 16, gl_MatrixUseAccumulator> matC =
+    coopmat<float16_t, gl_ScopeWorkgroup, 16, 16, gl_MatrixUseAccumulator>(acc);
+  coopMatStoreTensorNV(matC, data_c, 0, sliceTensorLayoutNV(layoutC, 0, 16, 0, 16), transpose);
+}

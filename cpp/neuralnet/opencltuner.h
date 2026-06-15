@@ -6,8 +6,8 @@
 #include "../core/logger.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/nninputs.h"
-#include "../neuralnet/openclincludes.h"
 #include "../neuralnet/openclhelpers.h"
+#include "../neuralnet/openclincludes.h"
 
 namespace OpenCLParams {
   struct XGemmDirectParams {
@@ -96,14 +96,15 @@ namespace OpenCLParams {
     std::string compileOptions() const;
     std::string padDesc() const;
     std::string padCompileOptions() const;
-    int getRequiredCDivisor() const; // Use of HGemmWmmaNCHW on a matrix mult requires that input and output C is divisble by this
+    int getRequiredCDivisor()
+      const;  // Use of HGemmWmmaNCHW on a matrix mult requires that input and output C is divisble by this
     void fillFromDesc(const std::string& fileName, const std::string& desc);
     bool isValid() const;
     bool isSimple() const;
   };
 
   struct Conv3x3Params {
-    //Winograd input and output tile sizes
+    // Winograd input and output tile sizes
     int INTILE_XSIZE = 4;
     int INTILE_YSIZE = 4;
     int OUTTILE_XSIZE = 2;
@@ -125,7 +126,7 @@ namespace OpenCLParams {
   };
 
   struct Conv5x5Params {
-    //Winograd input and output tile sizes
+    // Winograd input and output tile sizes
     int INTILE_XSIZE = 6;
     int INTILE_YSIZE = 6;
     int OUTTILE_XSIZE = 2;
@@ -171,9 +172,9 @@ namespace OpenCLParams {
   };
 
   struct TransformerRMSNormParams {
-    int WG_C_SIZE = 64;         // threads per workgroup for C-reduction
-    int WG_XY_SIZE = 1;         // spatial positions per workgroup
-    int C_PER_THREAD = 4;       // channels per thread per loop iteration
+    int WG_C_SIZE = 64;    // threads per workgroup for C-reduction
+    int WG_XY_SIZE = 1;    // spatial positions per workgroup
+    int C_PER_THREAD = 4;  // channels per thread per loop iteration
 
     std::string desc() const;
     std::string compileOptions() const;
@@ -202,8 +203,8 @@ namespace OpenCLParams {
   };
 
   struct SpatialRMSNormParams {
-    int TILE_SIZE = 32;           // workgroup size for reduction kernels (passes 1 and 2)
-    int APPLY_ELTS_PER_THREAD = 1; // elements per work-item in apply kernel
+    int TILE_SIZE = 32;             // workgroup size for reduction kernels (passes 1 and 2)
+    int APPLY_ELTS_PER_THREAD = 1;  // elements per work-item in apply kernel
 
     std::string desc() const;
     std::string reduceCompileOptions() const;
@@ -211,7 +212,7 @@ namespace OpenCLParams {
     void fillFromDesc(const std::string& fileName, const std::string& desc);
     bool isValid() const;
   };
-}
+}  // namespace OpenCLParams
 
 struct OpenCLTuneParams {
   OpenCLParams::XGemmDirectParams xGemmDirect = OpenCLParams::XGemmDirectParams();
@@ -258,7 +259,7 @@ namespace OpenCLTuner {
   constexpr int DEFAULT_X_SIZE = NNPos::MAX_BOARD_LEN;
   constexpr int DEFAULT_Y_SIZE = NNPos::MAX_BOARD_LEN;
   constexpr int DEFAULT_BATCH_SIZE = 4;
-  constexpr int DEFAULT_WINOGRAD_3X3_TILE_SIZE = 4;
+  constexpr int DEFAULT_WINOGRAD_3X3_TILE_SIZE = 2;
 
   struct ModelInfoForTuning {
     int maxConvChannels1x1;
@@ -298,11 +299,11 @@ namespace OpenCLTuner {
     std::ostream& out,
     bool verboseErrors,
     bool verboseTuner,
-    OpenCLTuneParams& tunedConfig
-  );
+    OpenCLTuneParams& tunedConfig);
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
-  std::string defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, int trunkNumChannels, int modelVersion);
+  std::string
+  defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, int trunkNumChannels, int modelVersion);
   std::string defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, const ModelInfoForTuning& modelInfo);
 
   OpenCLTuneParams loadOrAutoTune(
@@ -319,18 +320,15 @@ namespace OpenCLTuner {
     enabled_t testFP16ComputeMode,
     enabled_t testFP16TensorCoresMode,
     ModelInfoForTuning modelInfo,
-    bool full
-  );
+    bool full);
 
   void autoTuneEverything(
     const std::string& homeDataDirOverride,
     int gpuIdxForTuning,
     Logger* logger,
     enabled_t useFP16Mode,
-    bool full
-  );
+    bool full);
 
-}
+}  // namespace OpenCLTuner
 
-
-#endif //NEURALNET_OPENCL_TUNER_H_
+#endif  // NEURALNET_OPENCL_TUNER_H_
