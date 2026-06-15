@@ -458,7 +458,6 @@ $$MULTIPLE_GPUS
 
 )%%";
 
-
 string GTPConfig::makeConfig(
   const Rules& rules,
   int64_t maxVisits,
@@ -468,8 +467,7 @@ string GTPConfig::makeConfig(
   const std::vector<int>& deviceIdxs,
   int nnCacheSizePowerOfTwo,
   int nnMutexPoolSizePowerOfTwo,
-  int numSearchThreads
-) {
+  int numSearchThreads) {
   string config = gtpBasePart1 + gtpBasePart2;
   auto replace = [&](const string& key, const string& replacement) {
     size_t pos = config.find(key);
@@ -477,45 +475,80 @@ string GTPConfig::makeConfig(
     config.replace(pos, key.size(), replacement);
   };
 
-  if(rules.koRule == Rules::KO_SIMPLE)      replace("$$KO_RULE", "koRule = SIMPLE  # options: SIMPLE, POSITIONAL, SITUATIONAL");
-  else if(rules.koRule == Rules::KO_POSITIONAL)  replace("$$KO_RULE", "koRule = POSITIONAL  # options: SIMPLE, POSITIONAL, SITUATIONAL");
-  else if(rules.koRule == Rules::KO_SITUATIONAL) replace("$$KO_RULE", "koRule = SITUATIONAL  # options: SIMPLE, POSITIONAL, SITUATIONAL");
-  else if(rules.koRule == Rules::KO_SPIGHT) replace("$$KO_RULE", "koRule = SPIGHT  # options: SIMPLE, POSITIONAL, SITUATIONAL");
-  else { ASSERT_UNREACHABLE; }
+  if(rules.koRule == Rules::KO_SIMPLE)
+    replace("$$KO_RULE", "koRule = SIMPLE  # options: SIMPLE, POSITIONAL, SITUATIONAL");
+  else if(rules.koRule == Rules::KO_POSITIONAL)
+    replace("$$KO_RULE", "koRule = POSITIONAL  # options: SIMPLE, POSITIONAL, SITUATIONAL");
+  else if(rules.koRule == Rules::KO_SITUATIONAL)
+    replace("$$KO_RULE", "koRule = SITUATIONAL  # options: SIMPLE, POSITIONAL, SITUATIONAL");
+  else if(rules.koRule == Rules::KO_SPIGHT)
+    replace("$$KO_RULE", "koRule = SPIGHT  # options: SIMPLE, POSITIONAL, SITUATIONAL");
+  else {
+    ASSERT_UNREACHABLE;
+  }
 
-  if(rules.scoringRule == Rules::SCORING_AREA)            replace("$$SCORING_RULE", "scoringRule = AREA  # options: AREA, TERRITORY");
-  else if(rules.scoringRule == Rules::SCORING_TERRITORY)  replace("$$SCORING_RULE", "scoringRule = TERRITORY  # options: AREA, TERRITORY");
-  else { ASSERT_UNREACHABLE; }
+  if(rules.scoringRule == Rules::SCORING_AREA)
+    replace("$$SCORING_RULE", "scoringRule = AREA  # options: AREA, TERRITORY");
+  else if(rules.scoringRule == Rules::SCORING_TERRITORY)
+    replace("$$SCORING_RULE", "scoringRule = TERRITORY  # options: AREA, TERRITORY");
+  else {
+    ASSERT_UNREACHABLE;
+  }
 
-  if(rules.taxRule == Rules::TAX_NONE)      replace("$$TAX_RULE", "taxRule = NONE  # options: NONE, SEKI, ALL");
-  else if(rules.taxRule == Rules::TAX_SEKI) replace("$$TAX_RULE", "taxRule = SEKI  # options: NONE, SEKI, ALL");
-  else if(rules.taxRule == Rules::TAX_ALL)  replace("$$TAX_RULE", "taxRule = ALL  # options: NONE, SEKI, ALL");
-  else { ASSERT_UNREACHABLE; }
+  if(rules.taxRule == Rules::TAX_NONE)
+    replace("$$TAX_RULE", "taxRule = NONE  # options: NONE, SEKI, ALL");
+  else if(rules.taxRule == Rules::TAX_SEKI)
+    replace("$$TAX_RULE", "taxRule = SEKI  # options: NONE, SEKI, ALL");
+  else if(rules.taxRule == Rules::TAX_ALL)
+    replace("$$TAX_RULE", "taxRule = ALL  # options: NONE, SEKI, ALL");
+  else {
+    ASSERT_UNREACHABLE;
+  }
 
-  if(rules.multiStoneSuicideLegal) replace("$$MULTI_STONE_SUICIDE", "multiStoneSuicideLegal = true");
-  else                             replace("$$MULTI_STONE_SUICIDE", "multiStoneSuicideLegal = false");
+  if(rules.multiStoneSuicideLegal)
+    replace("$$MULTI_STONE_SUICIDE", "multiStoneSuicideLegal = true");
+  else
+    replace("$$MULTI_STONE_SUICIDE", "multiStoneSuicideLegal = false");
 
-  if(rules.hasButton) replace("$$BUTTON", "hasButton = true");
-  else                replace("$$BUTTON", "hasButton = false");
+  if(rules.hasButton)
+    replace("$$BUTTON", "hasButton = true");
+  else
+    replace("$$BUTTON", "hasButton = false");
 
-  if(rules.friendlyPassOk) replace("$$FRIENDLY_PASS_OK", "friendlyPassOk = true");
-  else                     replace("$$FRIENDLY_PASS_OK", "friendlyPassOk = false");
+  if(rules.friendlyPassOk)
+    replace("$$FRIENDLY_PASS_OK", "friendlyPassOk = true");
+  else
+    replace("$$FRIENDLY_PASS_OK", "friendlyPassOk = false");
 
-  if(rules.whiteHandicapBonusRule == Rules::WHB_ZERO)              replace("$$WHITE_HANDICAP_BONUS", "whiteHandicapBonus = 0  # options: 0, N, N-1");
-  else if(rules.whiteHandicapBonusRule == Rules::WHB_N)            replace("$$WHITE_HANDICAP_BONUS", "whiteHandicapBonus = N  # options: 0, N, N-1");
-  else if(rules.whiteHandicapBonusRule == Rules::WHB_N_MINUS_ONE)  replace("$$WHITE_HANDICAP_BONUS", "whiteHandicapBonus = N-1  # options: 0, N, N-1");
-  else { ASSERT_UNREACHABLE; }
+  if(rules.whiteHandicapBonusRule == Rules::WHB_ZERO)
+    replace("$$WHITE_HANDICAP_BONUS", "whiteHandicapBonus = 0  # options: 0, N, N-1");
+  else if(rules.whiteHandicapBonusRule == Rules::WHB_N)
+    replace("$$WHITE_HANDICAP_BONUS", "whiteHandicapBonus = N  # options: 0, N, N-1");
+  else if(rules.whiteHandicapBonusRule == Rules::WHB_N_MINUS_ONE)
+    replace("$$WHITE_HANDICAP_BONUS", "whiteHandicapBonus = N-1  # options: 0, N, N-1");
+  else {
+    ASSERT_UNREACHABLE;
+  }
 
-  if(maxVisits < ((int64_t)1 << 50)) replace("$$MAX_VISITS", "maxVisits = " + Global::int64ToString(maxVisits));
-  else                               replace("$$MAX_VISITS", "# maxVisits = 500");
-  if(maxPlayouts < ((int64_t)1 << 50)) replace("$$MAX_PLAYOUTS", "maxPlayouts = " + Global::int64ToString(maxPlayouts));
-  else                                 replace("$$MAX_PLAYOUTS", "# maxPlayouts = 300");
-  if(maxTime < 1e20)                   replace("$$MAX_TIME", "maxTime = " + Global::doubleToString(maxTime));
-  else                                 replace("$$MAX_TIME", "# maxTime = 10.0");
+  if(maxVisits < ((int64_t)1 << 50))
+    replace("$$MAX_VISITS", "maxVisits = " + Global::int64ToString(maxVisits));
+  else
+    replace("$$MAX_VISITS", "# maxVisits = 500");
+  if(maxPlayouts < ((int64_t)1 << 50))
+    replace("$$MAX_PLAYOUTS", "maxPlayouts = " + Global::int64ToString(maxPlayouts));
+  else
+    replace("$$MAX_PLAYOUTS", "# maxPlayouts = 300");
+  if(maxTime < 1e20)
+    replace("$$MAX_TIME", "maxTime = " + Global::doubleToString(maxTime));
+  else
+    replace("$$MAX_TIME", "# maxTime = 10.0");
 
-  if(maxPonderTime <= 0)               replace("$$PONDERING", "ponderingEnabled = false\n# maxTimePondering = 60.0");
-  else if(maxPonderTime < 1e20)        replace("$$PONDERING", "ponderingEnabled = true\nmaxTimePondering = " + Global::doubleToString(maxPonderTime));
-  else                                 replace("$$PONDERING", "ponderingEnabled = true\n# maxTimePondering = 60.0");
+  if(maxPonderTime <= 0)
+    replace("$$PONDERING", "ponderingEnabled = false\n# maxTimePondering = 60.0");
+  else if(maxPonderTime < 1e20)
+    replace("$$PONDERING", "ponderingEnabled = true\nmaxTimePondering = " + Global::doubleToString(maxPonderTime));
+  else
+    replace("$$PONDERING", "ponderingEnabled = true\n# maxTimePondering = 60.0");
 
   replace("$$NUM_SEARCH_THREADS", Global::intToString(numSearchThreads));
   replace("$$NN_CACHE_SIZE_POWER_OF_TWO", Global::intToString(nnCacheSizePowerOfTwo));
@@ -523,20 +556,26 @@ string GTPConfig::makeConfig(
 
   if(deviceIdxs.size() <= 0) {
     replace("$$MULTIPLE_GPUS", "");
-  }
-  else {
+  } else {
     string replacement = "";
     replacement += "numNNServerThreadsPerModel = " + Global::uint64ToString(deviceIdxs.size()) + "\n";
 
-    for(int i = 0; i<deviceIdxs.size(); i++) {
+    for(int i = 0; i < deviceIdxs.size(); i++) {
 #ifdef USE_CUDA_BACKEND
-      replacement += "cudaDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
+      replacement +=
+        "cudaDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
 #endif
 #ifdef USE_TENSORRT_BACKEND
-      replacement += "trtDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
+      replacement +=
+        "trtDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
 #endif
 #ifdef USE_OPENCL_BACKEND
-      replacement += "openclDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
+      replacement +=
+        "openclDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
+#endif
+#ifdef USE_VULKAN_BACKEND
+      replacement +=
+        "vulkanDeviceToUseThread" + Global::intToString(i) + " = " + Global::intToString(deviceIdxs[i]) + "\n";
 #endif
     }
     replace("$$MULTIPLE_GPUS", replacement);

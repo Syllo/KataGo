@@ -1,7 +1,7 @@
 #include "main.h"
 
-#include "core/os.h"
 #include "core/mainargs.h"
+#include "core/os.h"
 
 #ifdef NO_GIT_REVISION
 #define GIT_REVISION "<omitted>"
@@ -68,7 +68,7 @@ runsekitrainwritetests : Run some tests involving seki train output
 }
 
 static int handleSubcommand(const string& subcommand, const vector<string>& args) {
-  vector<string> subArgs(args.begin()+1,args.end());
+  vector<string> subArgs(args.begin() + 1, args.end());
   if(subcommand == "analysis")
     return MainCmds::analysis(subArgs);
   else if(subcommand == "benchmark")
@@ -80,7 +80,7 @@ static int handleSubcommand(const string& subcommand, const vector<string>& args
   else if(subcommand == "gatekeeper")
     return MainCmds::gatekeeper(subArgs);
   else if(subcommand == "genconfig")
-    return MainCmds::genconfig(subArgs,args[0]);
+    return MainCmds::genconfig(subArgs, args[0]);
   else if(subcommand == "gtp")
     return MainCmds::gtp(subArgs);
   else if(subcommand == "tuner")
@@ -172,8 +172,7 @@ static int handleSubcommand(const string& subcommand, const vector<string>& args
   else if(subcommand == "version") {
     cout << Version::getKataGoVersionFullInfo() << std::flush;
     return 0;
-  }
-  else {
+  } else {
     cout << "Unknown subcommand: " << subcommand << endl;
     printHelp(args);
     return 1;
@@ -181,9 +180,8 @@ static int handleSubcommand(const string& subcommand, const vector<string>& args
   return 0;
 }
 
-
 int main(int argc, const char* const* argv) {
-  vector<string> args = MainArgs::getCommandLineArgsUTF8(argc,argv);
+  vector<string> args = MainArgs::getCommandLineArgsUTF8(argc, argv);
   MainArgs::makeCoutAndCerrAcceptUTF8();
 
   if(args.size() < 2) {
@@ -197,17 +195,15 @@ int main(int argc, const char* const* argv) {
   }
 
 #if defined(OS_IS_WINDOWS)
-  //On windows, uncaught exceptions reaching toplevel don't normally get printed out,
-  //so explicitly catch everything and print
+  // On windows, uncaught exceptions reaching toplevel don't normally get printed out,
+  // so explicitly catch everything and print
   int result;
   try {
     result = handleSubcommand(cmdArg, args);
-  }
-  catch(std::exception& e) {
+  } catch(std::exception& e) {
     cerr << "Uncaught exception: " << e.what() << endl;
     return 1;
-  }
-  catch(...) {
+  } catch(...) {
     cerr << "Uncaught exception that is not a std::exception... exiting due to unknown error" << endl;
     return 1;
   }
@@ -216,7 +212,6 @@ int main(int argc, const char* const* argv) {
   return handleSubcommand(cmdArg, args);
 #endif
 }
-
 
 string Version::getKataGoVersion() {
   return string("1.16.5");
@@ -244,6 +239,8 @@ string Version::getKataGoVersionFullInfo() {
   out << "Using Metal backend" << endl;
 #elif defined(USE_OPENCL_BACKEND)
   out << "Using OpenCL backend" << endl;
+#elif defined(USE_VULKAN_BACKEND)
+  out << "Using Vulkan backend" << endl;
 #elif defined(USE_EIGEN_BACKEND)
   out << "Using Eigen(CPU) backend" << endl;
 #else
@@ -280,6 +277,8 @@ string Version::getGitRevisionWithBackend() {
   s += "-metal";
 #elif defined(USE_OPENCL_BACKEND)
   s += "-opencl";
+#elif defined(USE_VULKAN_BACKEND)
+  s += "-vulkan";
 #elif defined(USE_EIGEN_BACKEND)
   s += "-eigen";
 #else
